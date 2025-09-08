@@ -7,7 +7,6 @@ import speech_recognition as sr
 import pandas as pd
 import yfinance as yf
 from difflib import get_close_matches
-from requests_toolbelt.multipart.encoder import MultipartEncoder
 import re
 import shutil
 import tarfile
@@ -312,22 +311,41 @@ async def process_yemot_recording(audio_file_path):
     return jsonify({"success": True}) # החזרת תשובה חיובית לימות המשיח
 
 # --- נקודת קצה של ה-API שתקבל קבצים ---
-@app.route('/process_audio', methods=['POST'])
+@app.route('/process_audio', methods=['GET'])
 def process_audio_endpoint():
-    print("--- 📥 התקבלה הקלטה חדשה דרך ה-API ---")
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part in the request"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
-    if file:
+    print("--- 📥 התקבלה בקשה חדשה דרך ה-API (GET) ---")
+    stockname = request.args.get('stockname')
+    if not stockname:
+        print("❌ שגיאה: פרמטר 'stockname' חסר בבקשה.")
+        return jsonify({"error": "Missing 'stockname' parameter"}), 400
+
+    yemot_download_url = "https://www.call2all.co.il/ym/api/DownloadFile"
+    # The 'stockname' param from Yemot API is a path like `/9/033.wav`. We build the full path.
+    file_path_on_yemot = f"ivr2:/{stockname.lstrip('/')}"
+    params = {
+        "token": TOKEN,
+        "path": file_path_on_yemot
+    }
+
+    try:
+        print(f"⬇️ מוריד קובץ אודיו מימות המשיח: {file_path_on_yemot}")
+        response = requests.get(yemot_download_url, params=params)
+        response.raise_for_status()
+
+        # Save the downloaded content to a temporary file
         file_path = TEMP_INPUT_WAV
-        file.save(file_path)
-        try:
-            return asyncio.run(process_yemot_recording(file_path))
-        except Exception as e:
-            print(f"❌ שגיאה קריטית בעיבוד: {e}")
-            return jsonify({"error": "Failed to process audio"}), 500
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
+
+        print(f"✅ הורדה הושלמה. הקובץ נשמר באופן זמני: {file_path}")
+        return asyncio.run(process_yemot_recording(file_path))
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ שגיאה בהורדת הקובץ מימות המשיח: {e}")
+        return jsonify({"error": "Failed to download audio file"}), 500
+    except Exception as e:
+        print(f"❌ שגיאה קריטית בעיבוד: {e}")
+        return jsonify({"error": "Failed to process audio"}), 500
 
 if __name__ == "__main__":
     ensure_ffmpeg()
