@@ -10,7 +10,7 @@ from difflib import get_close_matches
 import re
 import shutil
 import tarfile
-from flask import Flask, request, jsonify
+from requests_toolbelt import MultipartEncoder # השורה החסרה
 
 # --- הגדרות מערכת ימות המשיח ---
 USERNAME = "0733181201"
