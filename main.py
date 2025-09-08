@@ -12,26 +12,20 @@ import shutil
 import tarfile
 import logging
 import warnings
-from requests_toolbelt import MultipartEncoder  # השורה החסרה
-from flask import Flask, request, jsonify
+from requests_toolbelt import MultipartEncoder
+from flask import Flask, request, jsonify, Response
 
 # ------------ לוגים (קצר ונקי) ------------
-LOG_LEVEL = logging.INFO  # אפשר לשנות ל: logging.WARNING / logging.ERROR / logging.DEBUG
-
+LOG_LEVEL = logging.INFO
 def setup_logging():
-    # פורמט קצר: שעה | רמת לוג | הודעה
     fmt = "%(asctime)s | %(levelname).1s | %(message)s"
     datefmt = "%H:%M:%S"
     logging.basicConfig(level=LOG_LEVEL, format=fmt, datefmt=datefmt)
-
-    # השתקת רעשים מספריות חיצוניות
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)   # לוגי בקשות של Flask
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("edge_tts").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("yfinance").setLevel(logging.WARNING)
-
-    # התעלמות מאזהרות לא מועילות (אדומות/ארוכות)
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
@@ -59,7 +53,6 @@ FFMPEG_EXECUTABLE = "ffmpeg"
 app = Flask(__name__)
 
 def ensure_ffmpeg():
-    """מוודא ש-FFmpeg מותקן ונגיש."""
     log.info("בודק FFmpeg...")
     global FFMPEG_EXECUTABLE
     if not shutil.which("ffmpeg"):
@@ -99,7 +92,6 @@ def ensure_ffmpeg():
         log.info("FFmpeg זמין במערכת.")
 
 def transcribe_audio(filename):
-    """מתמלל קובץ אודיו באמצעות Google Speech Recognition."""
     log.info("תמלול ההקלטה...")
     r = sr.Recognizer()
     try:
@@ -119,7 +111,6 @@ def transcribe_audio(filename):
         return ""
 
 def normalize_text(text):
-    """מנרמל טקסט להשוואה."""
     if not isinstance(text, str):
         if pd.isna(text):
             text = ""
@@ -128,7 +119,6 @@ def normalize_text(text):
     return re.sub(r'[^א-תa-zA-Z0-9 ]', '', text).lower().strip()
 
 def load_stock_data(path):
-    """טוען נתוני מניות מקובץ CSV."""
     try:
         df = pd.read_csv(path)
         stock_data = {}
@@ -157,14 +147,12 @@ def load_stock_data(path):
         return {}
 
 def get_best_match(query, stock_dict):
-    """מוצא את ההתמה הטובה ביותר לשאילתה מתוך רשימת המניות."""
     matches = get_close_matches(normalize_text(query), stock_dict.keys(), n=1, cutoff=0.7)
     if not matches:
         matches = get_close_matches(normalize_text(query), stock_dict.keys(), n=1, cutoff=0.5)
     return matches[0] if matches else None
 
 def get_stock_price_data(ticker):
-    """מביא נתוני מחיר ושינוי יומי עבור מניה."""
     log.info(f"אחזור נתונים: {ticker}")
     try:
         stock = yf.Ticker(ticker)
@@ -181,7 +169,6 @@ def get_stock_price_data(ticker):
         return None
 
 def create_ext_ini_file(action_type, value):
-    """יוצר קובץ ext.ini להפנייה בימות המשיח."""
     try:
         with open(OUTPUT_INI_FILE_NAME, 'w', encoding='windows-1255') as f:
             if action_type == "go_to_folder":
@@ -198,7 +185,6 @@ def create_ext_ini_file(action_type, value):
         return False
 
 def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
-    """מעלה קובץ (אודיו או INI) לימות המשיח."""
     full_upload_path = f"ivr2:/{UPLOAD_FOLDER_FOR_OUTPUT}/{yemot_file_name_or_path_on_yemot}"
     try:
         m = MultipartEncoder(fields={
@@ -220,7 +206,6 @@ def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
         return False
 
 def convert_mp3_to_wav(mp3_file, wav_file):
-    """ממיר קובץ MP3 ל-WAV באמצעות FFmpeg."""
     try:
         subprocess.run(
             [FFMPEG_EXECUTABLE, "-loglevel", "error", "-y", "-i", mp3_file,
@@ -238,7 +223,6 @@ def convert_mp3_to_wav(mp3_file, wav_file):
     return False
 
 async def create_audio_file_from_text(text, filename):
-    """יוצר קובץ אודיו (MP3 זמני) מטקסט באמצעות Edge TTS."""
     try:
         comm = edge_tts.Communicate(text, voice="he-IL-AvriNeural")
         await comm.save(filename)
@@ -248,12 +232,32 @@ async def create_audio_file_from_text(text, filename):
         log.error(f"שגיאת TTS: {e}")
         return False
 
+def _cleanup_files(paths):
+    for f in paths:
+        try:
+            if f and os.path.exists(f):
+                os.remove(f)
+                log.info(f"נמחק זמני: {f}")
+        except Exception:
+            pass
+
+def _api_path_from_target(target_path: str) -> str:
+    """
+    המרה של 'ivr2:/1/2/2/07/' -> '/1/2/2/07'
+    """
+    if not target_path:
+        return ""
+    p = target_path.replace("ivr2:", "")
+    if not p.startswith("/"):
+        p = "/" + p
+    return p.rstrip("/")
+
 # --- פונקציית העיבוד המרכזית ---
 async def process_yemot_recording(audio_file_path):
-    """מעבד את הקלטת האודיו ומגיב בהתאם."""
     log.info("עיבוד הקלטה חדשה...")
     stock_data = load_stock_data(CSV_FILE_PATH)
     if not stock_data:
+        # מסלול רגיל: יצירת הודעה קולית שגיאה
         response_text = "לא ניתן להמשיך ללא נתוני מניות."
         action_type = "play_file"
         action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
@@ -269,23 +273,30 @@ async def process_yemot_recording(audio_file_path):
             if best_match_key:
                 log.info(f"התאמה: {best_match_key}")
                 stock_info = stock_data[best_match_key]
+
+                # --- שינוי: אם יש שלוחה ייעודית → מחזירים תשובת API טקסטואלית ומעבירים ---
                 if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
-                    response_text = f"מפנה לשלוחת {stock_info['display_name']}."
-                    action_type = "go_to_folder"
-                    action_value = stock_info["target_path"]
-                    log.info(f"הפניה לשלוחה: {stock_info['target_path']}")
+                    api_path = _api_path_from_target(stock_info["target_path"])
+                    log.info(f"החזרת תשובת API למעבר לשלוחה: {api_path}")
+
+                    # ניקוי הקלט לפני החזרה
+                    _cleanup_files([audio_file_path])
+
+                    # תשובת טקסט פשוטה כדי שיעבור מיידית
+                    return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
+
+                # --- אחרת: מסלול רגיל (יוצר קבצים ומשמיע) ---
+                data = get_stock_price_data(stock_info["symbol"])
+                if data:
+                    direction = "עלייה" if data["day_change_percent"] > 0 else "ירידה"
+                    response_text = (
+                        f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
+                        f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
+                    )
+                    log.info("נתונים הוחזרו בהצלחה.")
                 else:
-                    data = get_stock_price_data(stock_info["symbol"])
-                    if data:
-                        direction = "עלייה" if data["day_change_percent"] > 0 else "ירידה"
-                        response_text = (
-                            f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
-                            f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
-                        )
-                        log.info("נתונים הוחזרו בהצלחה.")
-                    else:
-                        response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
-                        log.warning("לא נמצאו נתונים למניה.")
+                    response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
+                    log.warning("לא נמצאו נתונים למניה.")
             else:
                 response_text = "לא הצלחנו לזהות את נייר הערך שביקשת. אנא נסה שנית."
                 log.warning("לא נמצאה התאמה לרשימה.")
@@ -293,6 +304,7 @@ async def process_yemot_recording(audio_file_path):
             response_text = "לא זוהה דיבור ברור בהקלטה. אנא נסה לדבר באופן ברור יותר."
             log.warning("לא זוהה דיבור.")
 
+    # ===== מסלול רגיל (ללא שלוחה ייעודית): ייצור קובץ שמע + ext.ini =====
     generated_audio_success = False
     uploaded_ext_ini = False
     output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
@@ -321,19 +333,14 @@ async def process_yemot_recording(audio_file_path):
             log.error(f"כשל ביצירת {OUTPUT_INI_FILE_NAME}.")
     else:
         log.warning("לא נוצרה תגובה קולית/הפניה.")
+        _cleanup_files([audio_file_path, TEMP_MP3_FILE])  # ניקוי מינימלי
         return jsonify({"success": False, "message": "Failed to create response"})
 
     # ניקוי קבצים זמניים
     local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, OUTPUT_INI_FILE_NAME]
     if output_yemot_wav_name and os.path.exists(output_yemot_wav_name) and action_type == "play_file":
         local_files_to_clean.append(output_yemot_wav_name)
-    for f in local_files_to_clean:
-        try:
-            if os.path.exists(f):
-                os.remove(f)
-                log.info(f"נמחק זמני: {f}")
-        except Exception:
-            pass
+    _cleanup_files(local_files_to_clean)
 
     log.info("סיום עיבוד והעלאה.")
     return jsonify({"success": True})
@@ -361,7 +368,9 @@ def process_audio_endpoint():
             f.write(response.content)
 
         log.info("ההורדה הושלמה.")
-        return asyncio.run(process_yemot_recording(file_path))
+        # שים לב: הפונקציה עלולה להחזיר Response טקסטואלי (go_to_folder=...) או JSON
+        result = asyncio.run(process_yemot_recording(file_path))
+        return result
 
     except requests.exceptions.RequestException as e:
         log.error(f"שגיאה בהורדה מימות: {e}")
@@ -372,7 +381,6 @@ def process_audio_endpoint():
 
 if __name__ == "__main__":
     ensure_ffmpeg()
-    _ = load_stock_data(CSV_FILE_PATH)  # טעינה מוקדמת (וגם בדיקת קובץ)
+    _ = load_stock_data(CSV_FILE_PATH)
     log.info("השרת עלה. ממתין לבקשות...")
-    # מנטרל רילואדר כדי לא להכפיל לוגים
     app.run(host='0.0.0.0', port=5000, use_reloader=False)
