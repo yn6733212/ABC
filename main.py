@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
-UPLOAD_FOLDER_FOR_OUTPUT = "11"
+UPLOAD_FOLDER_FOR_OUTPUT = "7"
 
 # --- הגדרות קבצים ---
 CSV_FILE_PATH = "stock_data.csv"
