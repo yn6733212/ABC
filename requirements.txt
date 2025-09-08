@@ -7,3 +7,4 @@ speechrecognition
 requests-toolbelt
 numpy
 setuptools
+Flask
