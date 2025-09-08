@@ -11,6 +11,7 @@ import re
 import shutil
 import tarfile
 from requests_toolbelt import MultipartEncoder # השורה החסרה
+from flask import Flask, request, jsonify
 
 # --- הגדרות מערכת ימות המשיח ---
 USERNAME = "0733181201"
