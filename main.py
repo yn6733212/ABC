@@ -37,14 +37,16 @@ log = logging.getLogger(__name__)
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
-UPLOAD_FOLDER_FOR_OUTPUT = "7"
+
+# **שלוחה יעד ברירת מחדל (ללא שלוחה ייעודית)**
+UPLOAD_FOLDER_FOR_OUTPUT = "7"   # נניח שמוגדרת בימות להשמיע 000.wav
 
 # --- הגדרות קבצים ---
 CSV_FILE_PATH = "stock_data.csv"
 TEMP_MP3_FILE = "temp_output.mp3"
 TEMP_INPUT_WAV = "temp_input.wav"
-OUTPUT_AUDIO_FILE_BASE = "000"
-OUTPUT_INI_FILE_NAME = "ext.ini"
+OUTPUT_AUDIO_FILE_BASE = "000"  # נעלה בשם 000.wav כדי שיתנגן כברירת מחדל בשלוחה
+OUTPUT_INI_FILE_NAME = "ext.ini"  # לא בשימוש עוד, נשאר כאן רק לשקיפות
 
 # --- נתיב להרצת ffmpeg ---
 FFMPEG_EXECUTABLE = "ffmpeg"
@@ -168,22 +170,6 @@ def get_stock_price_data(ticker):
         log.error(f"שגיאה באחזור {ticker}: {e}")
         return None
 
-def create_ext_ini_file(action_type, value):
-    try:
-        with open(OUTPUT_INI_FILE_NAME, 'w', encoding='windows-1255') as f:
-            if action_type == "go_to_folder":
-                f.write("type=go_to_folder\n")
-                relative_path = value.replace("ivr2:", "").rstrip('/')
-                f.write(f"go_to_folder={relative_path}\n")
-            elif action_type == "play_file":
-                f.write("type=playfile\n")
-                f.write("playfile_end_goto=/1/2\n")
-        log.info("נוצר ext.ini")
-        return True
-    except Exception as e:
-        log.error(f"שגיאה ביצירת INI: {e}")
-        return False
-
 def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
     full_upload_path = f"ivr2:/{UPLOAD_FOLDER_FOR_OUTPUT}/{yemot_file_name_or_path_on_yemot}"
     try:
@@ -256,94 +242,84 @@ def _api_path_from_target(target_path: str) -> str:
 async def process_yemot_recording(audio_file_path):
     log.info("עיבוד הקלטה חדשה...")
     stock_data = load_stock_data(CSV_FILE_PATH)
+    default_api_path = f"/{UPLOAD_FOLDER_FOR_OUTPUT}"  # '/7'
+
     if not stock_data:
-        # מסלול רגיל: יצירת הודעה קולית שגיאה
-        response_text = "לא ניתן להמשיך ללא נתוני מניות."
-        action_type = "play_file"
-        action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
-    else:
-        recognized_text = transcribe_audio(audio_file_path)
-        response_text = ""
-        action_type = "play_file"
-        action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
+        # אין CSV: בכל זאת נעביר לשלוחה 7 (ייתכן שלא יהיה מה להשמיע)
+        log.warning("אין נתוני מניות (CSV). מעביר לשלוחה ברירת מחדל.")
+        _cleanup_files([audio_file_path])
+        return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
-        if recognized_text:
-            log.info("חיפוש התאמה ברשימת המניות...")
-            best_match_key = get_best_match(recognized_text, stock_data)
-            if best_match_key:
-                log.info(f"התאמה: {best_match_key}")
-                stock_info = stock_data[best_match_key]
+    recognized_text = transcribe_audio(audio_file_path)
+    response_text = ""
+    best_match_key = None
 
-                # --- שינוי: אם יש שלוחה ייעודית → מחזירים תשובת API טקסטואלית ומעבירים ---
-                if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
-                    api_path = _api_path_from_target(stock_info["target_path"])
-                    log.info(f"החזרת תשובת API למעבר לשלוחה: {api_path}")
+    if recognized_text:
+        log.info("חיפוש התאמה ברשימת המניות...")
+        best_match_key = get_best_match(recognized_text, stock_data)
 
-                    # ניקוי הקלט לפני החזרה
-                    _cleanup_files([audio_file_path])
+    if best_match_key:
+        log.info(f"התאמה: {best_match_key}")
+        stock_info = stock_data[best_match_key]
 
-                    # תשובת טקסט פשוטה כדי שיעבור מיידית
-                    return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
+        # --- אם יש שלוחה ייעודית → מחזירים תשובת API טקסטואלית למעבר ---
+        if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
+            api_path = _api_path_from_target(stock_info["target_path"])
+            log.info(f"החזרת תשובת API למעבר לשלוחה ייעודית: {api_path}")
+            _cleanup_files([audio_file_path])
+            return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
 
-                # --- אחרת: מסלול רגיל (יוצר קבצים ומשמיע) ---
-                data = get_stock_price_data(stock_info["symbol"])
-                if data:
-                    direction = "עלייה" if data["day_change_percent"] > 0 else "ירידה"
-                    response_text = (
-                        f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
-                        f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
-                    )
-                    log.info("נתונים הוחזרו בהצלחה.")
-                else:
-                    response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
-                    log.warning("לא נמצאו נתונים למניה.")
-            else:
-                response_text = "לא הצלחנו לזהות את נייר הערך שביקשת. אנא נַסֵּה שנית."
-                log.warning("לא נמצאה התאמה לרשימה.")
+        # --- אחרת: בונים טקסט להשמעה (ועדיין נעביר לשלוחה 7 בתשובת שרת) ---
+        data = get_stock_price_data(stock_info["symbol"])
+        if data:
+            direction = "עלייה" if data["day_change_percent"] > 0 else "ירידה"
+            response_text = (
+                f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
+                f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
+            )
+            log.info("נתונים הוחזרו בהצלחה (ללא שלוחה ייעודית).")
         else:
-            response_text = "לא זוהה דיבור ברור בהקלטה. אנא נַסֵּה לדבר באופן ברור יותר."
+            response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
+            log.warning("לא נמצאו נתונים למניה.")
+    else:
+        # לא זוהתה מניה מהרשימה
+        if recognized_text:
+            response_text = "לא נמצאה התאמה לנייר הערך שביקשת. אנא נסה שוב."
+            log.warning("לא נמצאה התאמה לרשימה.")
+        else:
+            response_text = "לא זוהה דיבור ברור בהקלטה. אנא נסה לדבר באופן ברור יותר."
             log.warning("לא זוהה דיבור.")
 
-    # ===== מסלול רגיל (ללא שלוחה ייעודית): ייצור קובץ שמע + ext.ini =====
+    # ===== תמיד: מקרה ללא שלוחה ייעודית → נעלה קובץ 000.wav לשלוחה 7 ונחזיר go_to_folder=/7 =====
+    output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"  # '000.wav'
     generated_audio_success = False
-    uploaded_ext_ini = False
-    output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
+    uploaded_wav = False
 
-    if response_text and action_type == "play_file":
+    if response_text:
         if await create_audio_file_from_text(response_text, TEMP_MP3_FILE):
             if convert_mp3_to_wav(TEMP_MP3_FILE, output_yemot_wav_name):
-                if upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name):
-                    generated_audio_success = True
-                else:
-                    log.error("כשל בהעלאת קובץ השמע.")
+                uploaded_wav = upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name)
+                generated_audio_success = uploaded_wav
+                if not uploaded_wav:
+                    log.error("כשל בהעלאת קובץ השמע לשלוחה 7.")
             else:
                 log.error("כשל בהמרת MP3 ל-WAV.")
         else:
             log.error("כשל ביצירת קובץ אודיו מטקסט.")
-    elif action_type == "go_to_folder":
-        generated_audio_success = True
-
-    if generated_audio_success or action_type == "go_to_folder":
-        if create_ext_ini_file(action_type, action_value):
-            if upload_file_to_yemot(OUTPUT_INI_FILE_NAME, OUTPUT_INI_FILE_NAME):
-                uploaded_ext_ini = True
-            else:
-                log.error(f"כשל בהעלאת {OUTPUT_INI_FILE_NAME}.")
-        else:
-            log.error(f"כשל ביצירת {OUTPUT_INI_FILE_NAME}.")
     else:
-        log.warning("לא נוצרה תגובה קולית/הפניה.")
-        _cleanup_files([audio_file_path, TEMP_MP3_FILE])  # ניקוי מינימלי
-        return jsonify({"success": False, "message": "Failed to create response"})
+        log.warning("אין טקסט להשמעה (response_text ריק).")
 
-    # ניקוי קבצים זמניים
-    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, OUTPUT_INI_FILE_NAME]
-    if output_yemot_wav_name and os.path.exists(output_yemot_wav_name) and action_type == "play_file":
+    # ניקוי קבצים מקומי
+    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE]
+    if os.path.exists(output_yemot_wav_name):
         local_files_to_clean.append(output_yemot_wav_name)
     _cleanup_files(local_files_to_clean)
 
-    log.info("סיום עיבוד והעלאה.")
-    return jsonify({"success": True})
+    # גם אם העלאת ה-WAV נכשלה — עדיין נעביר את המאזין לשלוחה 7 (כפי שביקשת)
+    if not generated_audio_success:
+        log.warning("מעביר לשלוחה 7 למרות כשל ביצירת/העלאת קובץ.")
+
+    return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
 # --- נקודת קצה של ה-API שתקבל קבצים ---
 @app.route('/process_audio', methods=['GET'])
@@ -368,7 +344,7 @@ def process_audio_endpoint():
             f.write(response.content)
 
         log.info("ההורדה הושלמה.")
-        # שים לב: הפונקציה עלולה להחזיר Response טקסטואלי (go_to_folder=...) או JSON
+        # הפונקציה עלולה להחזיר Response טקסטואלי (go_to_folder=...) או JSON
         result = asyncio.run(process_yemot_recording(file_path))
         return result
 
