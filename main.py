@@ -81,16 +81,10 @@ def transcribe_audio(filename):
         with sr.AudioFile(filename) as source:
             audio = r.record(source)
         recognized_text = r.recognize_google(audio, language="he-IL")
-        print(f"👂 זיהה דיבור בהצלחה: '{recognized_text}'")
         return recognized_text
     except sr.UnknownValueError:
-        print("❌ זיהוי דיבור נכשל: לא זוהה דיבור ברור.")
-        return ""
-    except sr.RequestError as e:
-        print(f"❌ שגיאה בחיבור לשירות זיהוי הדיבור של גוגל: {e}.")
         return ""
     except Exception as e:
-        print(f"❌ שגיאה בלתי צפויה בתמלול: {e}")
         return ""
 
 def normalize_text(text):
@@ -140,24 +134,20 @@ def get_best_match(query, stock_dict):
 
 def get_stock_price_data(ticker):
     """מביא נתוני מחיר ושינוי יומי עבור מניה."""
-    print(f"📈 מאחזר נתונים עדכניים עבור {ticker}...")
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="7d")
         if hist.empty or len(hist) < 2:
-            print(f"⚠️ אין מספיק נתוני היסטוריה עבור {ticker}.")
             return None
         current_price = hist["Close"].iloc[-1]
         day_before_price = hist["Close"].iloc[-2]
         day_change_percent = (current_price - day_before_price) / day_before_price * 100 if day_before_price else 0
         return {"current": round(current_price, 2), "day_change_percent": round(day_change_percent, 2)}
-    except Exception as e:
-        print(f"❌ שגיאה באחזור נתונים עבור {ticker}: {e}")
+    except Exception:
         return None
 
 def create_ext_ini_file(action_type, value):
     """יוצר קובץ ext.ini להפנייה בימות המשיח."""
-    print(f"📝 יוצר קובץ ext.ini...")
     try:
         with open(OUTPUT_INI_FILE_NAME, 'w', encoding='windows-1255') as f:
             if action_type == "go_to_folder":
@@ -167,15 +157,12 @@ def create_ext_ini_file(action_type, value):
             elif action_type == "play_file":
                 f.write(f"type=playfile\n")
                 f.write(f"playfile_end_goto=/1/2\n")
-        print("✅ קובץ ext.ini נוצר בהצלחה.")
         return True
-    except Exception as e:
-        print(f"❌ שגיאה ביצירת קובץ INI: {e}")
+    except Exception:
         return False
 
 def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
     """מעלה קובץ (אודיו או INI) לימות המשיח."""
-    print(f"⬆️ מעלה קובץ '{os.path.basename(file_path)}' לימות המשיח...")
     full_upload_path = f"ivr2:/{UPLOAD_FOLDER_FOR_OUTPUT}/{yemot_file_name_or_path_on_yemot}"
     m = MultipartEncoder(fields={
         "token": TOKEN,
@@ -185,49 +172,40 @@ def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
     try:
         r = requests.post("https://www.call2all.co.il/ym/api/UploadFile", data=m, headers={'Content-Type': m.content_type})
         r.raise_for_status()
-        print(f"✅ הקובץ '{os.path.basename(file_path)}' הועלה בהצלחה.")
         return True
-    except requests.exceptions.RequestException as e:
-        print(f"❌ שגיאה בהעלאת קובץ לימות המשיח ({os.path.basename(file_path)}): {e}")
+    except requests.exceptions.RequestException:
         return False
-    except Exception as e:
-        print(f"❌ שגיאה בלתי צפויה בהעלאת קובץ לימות המשיח ({os.path.basename(file_path)}): {e}")
+    except Exception:
         return False
 
 def convert_mp3_to_wav(mp3_file, wav_file):
     """ממיר קובץ MP3 ל-WAV באמצעות FFmpeg."""
-    print("🔄 ממיר קובץ MP3 ל-WAV...")
     try:
-        result = subprocess.run(
+        subprocess.run(
             [FFMPEG_EXECUTABLE, "-loglevel", "error", "-y", "-i", mp3_file, "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le", wav_file],
-            check=True
+            check=True,
+            capture_output=True # מונע הדפסת שגיאות לפלט הראשי
         )
-        print(f"✅ קובץ שמע נוצר בהצלחה: {wav_file}")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ שגיאה בהמרה (FFmpeg): {e}.")
-    except FileNotFoundError:
-        print(f"❌ שגיאה בהמרה (FFmpeg): ffmpeg לא נמצא.")
-    except Exception as e:
-        print(f"❌ שגיאה כללית בהמרה: {e}")
-    return False
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    except Exception:
+        return False
 
 async def create_audio_file_from_text(text, filename):
     """יוצר קובץ אודיו (MP3 זמני) מטקסט באמצעות Edge TTS."""
-    print("🎙️ יוצר תגובה קולית מהטקסט...")
     try:
         comm = edge_tts.Communicate(text, voice="he-IL-AvriNeural")
         await comm.save(filename)
-        print(f"✅ קובץ טקסט-לקול זמני נוצר בהצלחה: {filename}")
         return True
-    except Exception as e:
-        print(f"❌ שגיאה ביצירת קובץ אודיו מטקסט: {e}")
+    except Exception:
         return False
 
 # --- פונקציית העיבוד המרכזית ---
 async def process_yemot_recording(audio_file_path):
     """מעבד את הקלטת האודיו ומגיב בהתאם."""
-    print("--- מתחיל עיבוד הקלטה חדשה ---")
+    print("התקבלה הקלטה חדשה")
+
     stock_data = load_stock_data(CSV_FILE_PATH)
     if not stock_data:
         response_text = "לא ניתן להמשיך ללא נתוני מניות."
@@ -235,21 +213,16 @@ async def process_yemot_recording(audio_file_path):
         action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
     else:
         recognized_text = transcribe_audio(audio_file_path)
-        response_text = ""
-        action_type = "play_file"
-        action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
-
+        
         if recognized_text:
-            print("🔍 מנסה למצוא התאמה בנתוני המניות...")
+            print(f"זוהה: {recognized_text}")
             best_match_key = get_best_match(recognized_text, stock_data)
             if best_match_key:
-                print(f"🎯 נמצאה התאמה: {best_match_key}")
                 stock_info = stock_data[best_match_key]
                 if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
                     response_text = f"מפנה לשלוחת {stock_info['display_name']}."
                     action_type = "go_to_folder"
                     action_value = stock_info["target_path"]
-                    print(f"💡 זוהתה הפניה לשלוחה ייעודית: {stock_info['target_path']}")
                 else:
                     data = get_stock_price_data(stock_info["symbol"])
                     if data:
@@ -258,70 +231,55 @@ async def process_yemot_recording(audio_file_path):
                             f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
                             f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
                         )
-                        print(f"✅ נתונים עבור {stock_info['display_name']} נקלטו בהצלחה.")
                     else:
                         response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
-                        print(f"❌ לא נמצאו נתונים עבור מניית {stock_info['display_name']}.")
             else:
                 response_text = "לא הצלחנו לזהות את נייר הערך שביקשת. אנא נסה שנית."
-                print(f"❌ לא זוהה נייר ערך תואם ברשימה עבור: '{recognized_text}'")
         else:
-            response_text = "לא זוהה דיבור ברור בהקלטה. אנא נסה לדבר באופן ברור יותר."
-            print("❌ לא זוהה דיבור ברור בהקלטה.")
+            response_text = "לא זוהה דיבור ברור."
 
-    generated_audio_success = False
-    uploaded_ext_ini = False
-    output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
-
-    if response_text and action_type == "play_file":
-        if await create_audio_file_from_text(response_text, TEMP_MP3_FILE):
-            if convert_mp3_to_wav(TEMP_MP3_FILE, output_yemot_wav_name):
-                if upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name):
-                    generated_audio_success = True
-                else:
-                    print("❌ נכשלה העלאת קובץ השמע.")
-            else:
-                print("❌ נכשלה המרת MP3 ל-WAV.")
+        action_type = "play_file" if not (stock_info["has_dedicated_folder"] and best_match_key) else "go_to_folder"
+        action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav" if action_type == "play_file" else stock_info["target_path"]
+        
+        if response_text:
+            print("מייצר קובץ שמע")
+            generated_audio_success = await create_audio_file_from_text(response_text, TEMP_MP3_FILE)
+            if generated_audio_success:
+                conversion_success = convert_mp3_to_wav(TEMP_MP3_FILE, f"{OUTPUT_AUDIO_FILE_BASE}.wav")
+                if conversion_success:
+                    upload_success = upload_file_to_yemot(f"{OUTPUT_AUDIO_FILE_BASE}.wav", f"{OUTPUT_AUDIO_FILE_BASE}.wav")
+                    if upload_success:
+                        print("הועלה בהצלחה לשלוחה")
+                        create_ext_ini_file(action_type, action_value)
+                        upload_file_to_yemot(OUTPUT_INI_FILE_NAME, OUTPUT_INI_FILE_NAME)
+                        print("ממתין להקלטה חדשה")
+                        return jsonify({"success": True})
         else:
-            print("❌ נכשלה יצירת קובץ אודיו מטקסט.")
-    elif action_type == "go_to_folder":
-        generated_audio_success = True
+            create_ext_ini_file(action_type, action_value)
+            upload_file_to_yemot(OUTPUT_INI_FILE_NAME, OUTPUT_INI_FILE_NAME)
+            print("ממתין להקלטה חדשה")
+            return jsonify({"success": True})
 
-    if generated_audio_success or action_type == "go_to_folder":
-        if create_ext_ini_file(action_type, action_value):
-            if upload_file_to_yemot(OUTPUT_INI_FILE_NAME, OUTPUT_INI_FILE_NAME):
-                uploaded_ext_ini = True
-            else:
-                print(f"❌ נכשלה העלאת קובץ {OUTPUT_INI_FILE_NAME}.")
-        else:
-            print(f"❌ נכשלה יצירת קובץ {OUTPUT_INI_FILE_NAME}.")
-    else:
-        print("⚠️ לא נוצרה תגובה קולית או הפניה לשלוחה.")
-        return jsonify({"success": False, "message": "Failed to create response"}) # החזרת תשובה שלילית לימות המשיח
-
+    # Clean up local files
     local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, OUTPUT_INI_FILE_NAME]
-    if output_yemot_wav_name and os.path.exists(output_yemot_wav_name) and action_type == "play_file":
-        local_files_to_clean.append(output_yemot_wav_name)
+    if os.path.exists(f"{OUTPUT_AUDIO_FILE_BASE}.wav"):
+        local_files_to_clean.append(f"{OUTPUT_AUDIO_FILE_BASE}.wav")
 
     for f in local_files_to_clean:
         if os.path.exists(f):
             os.remove(f)
-            print(f"🧹 נמחק קובץ זמני: {f}")
 
-    print("--- סיום עיבוד בהצלחה והעלאת התוצאות לשלוחה ---")
-    return jsonify({"success": True}) # החזרת תשובה חיובית לימות המשיח
+    return jsonify({"success": False})
 
 # --- נקודת קצה של ה-API שתקבל קבצים ---
 @app.route('/process_audio', methods=['GET'])
 def process_audio_endpoint():
-    print("--- 📥 התקבלה בקשה חדשה דרך ה-API (GET) ---")
+    print("--- הורדת קובץ אודיו מימות המשיח... ---")
     stockname = request.args.get('stockname')
     if not stockname:
-        print("❌ שגיאה: פרמטר 'stockname' חסר בבקשה.")
         return jsonify({"error": "Missing 'stockname' parameter"}), 400
 
     yemot_download_url = "https://www.call2all.co.il/ym/api/DownloadFile"
-    # The 'stockname' param from Yemot API is a path like `/9/033.wav`. We build the full path.
     file_path_on_yemot = f"ivr2:/{stockname.lstrip('/')}"
     params = {
         "token": TOKEN,
@@ -329,23 +287,19 @@ def process_audio_endpoint():
     }
 
     try:
-        print(f"⬇️ מוריד קובץ אודיו מימות המשיח: {file_path_on_yemot}")
         response = requests.get(yemot_download_url, params=params)
         response.raise_for_status()
 
-        # Save the downloaded content to a temporary file
         file_path = TEMP_INPUT_WAV
         with open(file_path, 'wb') as f:
             f.write(response.content)
 
-        print(f"✅ הורדה הושלמה. הקובץ נשמר באופן זמני: {file_path}")
+        print("✅ הורדה הושלמה.")
         return asyncio.run(process_yemot_recording(file_path))
 
-    except requests.exceptions.RequestException as e:
-        print(f"❌ שגיאה בהורדת הקובץ מימות המשיח: {e}")
+    except requests.exceptions.RequestException:
         return jsonify({"error": "Failed to download audio file"}), 500
-    except Exception as e:
-        print(f"❌ שגיאה קריטית בעיבוד: {e}")
+    except Exception:
         return jsonify({"error": "Failed to process audio"}), 500
 
 if __name__ == "__main__":
