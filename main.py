@@ -6,7 +6,6 @@ import subprocess
 import speech_recognition as sr
 import pandas as pd
 import yfinance as yf
-from difflib import get_close_matches
 import re
 import shutil
 import tarfile
@@ -14,6 +13,7 @@ import logging
 import warnings
 from requests_toolbelt import MultipartEncoder
 from flask import Flask, request, jsonify, Response
+from rapidfuzz import process, fuzz  # שדרוג 3 - RapidFuzz
 
 # ------------ לוגים (קצר ונקי) ------------
 LOG_LEVEL = logging.INFO
@@ -39,20 +39,40 @@ PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
 
 # **שלוחה יעד ברירת מחדל (ללא שלוחה ייעודית)**
-UPLOAD_FOLDER_FOR_OUTPUT = "7"   # נניח שמוגדרת בימות להשמיע 000.wav
+UPLOAD_FOLDER_FOR_OUTPUT = "7"  # נניח שמוגדרת בימות להשמיע 000.wav
 
 # --- הגדרות קבצים ---
 CSV_FILE_PATH = "stock_data.csv"
 TEMP_MP3_FILE = "temp_output.mp3"
 TEMP_INPUT_WAV = "temp_input.wav"
+TEMP_CLEAN_WAV = "temp_clean.wav"  # קובץ אחרי ניקוי
 OUTPUT_AUDIO_FILE_BASE = "000"  # נעלה בשם 000.wav כדי שיתנגן כברירת מחדל בשלוחה
-OUTPUT_INI_FILE_NAME = "ext.ini"  # לא בשימוש עוד, נשאר כאן רק לשקיפות
 
 # --- נתיב להרצת ffmpeg ---
 FFMPEG_EXECUTABLE = "ffmpeg"
 
 # --- הגדרת Flask App ---
 app = Flask(__name__)
+
+# ----------------------- שדרוג 1: ניקוי אודיו -----------------------
+def enhance_wav_with_ffmpeg(in_wav: str, out_wav: str) -> bool:
+    """
+    ניקוי רעש, סינון תדרים ושמירה על פורמט 8kHz/PCM שמתאים לטלפוניה.
+    """
+    try:
+        filters = "highpass=f=120,lowpass=f=3800,afftdn=nr=12"
+        cmd = [
+            FFMPEG_EXECUTABLE, "-loglevel", "error", "-y",
+            "-i", in_wav,
+            "-af", filters,
+            "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le",
+            out_wav
+        ]
+        subprocess.run(cmd, check=True)
+        return True
+    except Exception as e:
+        log.error(f"שגיאה בשיפור אודיו: {e}")
+        return False
 
 def ensure_ffmpeg():
     log.info("בודק FFmpeg...")
@@ -93,25 +113,61 @@ def ensure_ffmpeg():
     else:
         log.info("FFmpeg זמין במערכת.")
 
-def transcribe_audio(filename):
-    log.info("תמלול ההקלטה...")
+# ----------------------- שדרוג 2: שיפור פרמטרי זיהוי -----------------------
+def transcribe_with_alts(filename):
+    """
+    זיהוי דיבור עם קבלת מספר אלטרנטיבות (n-best) לשיפור זיהוי מניות.
+    """
     r = sr.Recognizer()
+    # פרמטרים מתקדמים לדיוק טוב יותר
+    r.energy_threshold = 200
+    r.dynamic_energy_threshold = True
+    r.pause_threshold = 0.5
+    r.phrase_threshold = 0.1
+    r.non_speaking_duration = 0.2
+
     try:
         with sr.AudioFile(filename) as source:
             audio = r.record(source)
-        recognized_text = r.recognize_google(audio, language="he-IL")
-        log.info(f"זוהה דיבור: '{recognized_text}'")
-        return recognized_text
+        res = r.recognize_google(audio, language="he-IL", show_all=True)
+        texts = []
+        if isinstance(res, dict) and "alternative" in res:
+            for a in res["alternative"]:
+                t = a.get("transcript")
+                if t:
+                    texts.append(t)
+        if not texts:
+            # fallback
+            single = r.recognize_google(audio, language="he-IL")
+            if single:
+                texts = [single]
+        log.info(f"זוהו אלטרנטיבות: {texts}")
+        return texts
     except sr.UnknownValueError:
         log.warning("דיבור לא ברור (לא זוהה).")
-        return ""
+        return []
     except sr.RequestError as e:
         log.error(f"שגיאת חיבור לשירות זיהוי דיבור: {e}")
-        return ""
+        return []
     except Exception as e:
         log.error(f"שגיאה בתמלול: {e}")
-        return ""
+        return []
 
+# ----------------------- שדרוג 3: RapidFuzz להשוואת שמות -----------------------
+def get_best_match_multi_hypotheses(hypotheses, stock_keys):
+    """
+    בחירת ההתאמה הטובה ביותר בין האלטרנטיבות לבין רשימת המניות.
+    """
+    best = None
+    best_score = -1
+    for h in hypotheses:
+        q = normalize_text(h)
+        match = process.extractOne(q, stock_keys, scorer=fuzz.token_set_ratio, score_cutoff=70)
+        if match and match[1] > best_score:
+            best, best_score = match[0], match[1]
+    return best
+
+# ----------------------- פונקציות קיימות -----------------------
 def normalize_text(text):
     if not isinstance(text, str):
         if pd.isna(text):
@@ -147,12 +203,6 @@ def load_stock_data(path):
     except Exception as e:
         log.error(f"שגיאה בטעינת נתוני מניות: {e}")
         return {}
-
-def get_best_match(query, stock_dict):
-    matches = get_close_matches(normalize_text(query), stock_dict.keys(), n=1, cutoff=0.7)
-    if not matches:
-        matches = get_close_matches(normalize_text(query), stock_dict.keys(), n=1, cutoff=0.5)
-    return matches[0] if matches else None
 
 def get_stock_price_data(ticker):
     log.info(f"אחזור נתונים: {ticker}")
@@ -228,9 +278,6 @@ def _cleanup_files(paths):
             pass
 
 def _api_path_from_target(target_path: str) -> str:
-    """
-    המרה של 'ivr2:/1/2/2/07/' -> '/1/2/2/07'
-    """
     if not target_path:
         return ""
     p = target_path.replace("ivr2:", "")
@@ -238,38 +285,41 @@ def _api_path_from_target(target_path: str) -> str:
         p = "/" + p
     return p.rstrip("/")
 
-# --- פונקציית העיבוד המרכזית ---
+# ----------------------- פונקציית העיבוד הראשית -----------------------
 async def process_yemot_recording(audio_file_path):
     log.info("עיבוד הקלטה חדשה...")
     stock_data = load_stock_data(CSV_FILE_PATH)
     default_api_path = f"/{UPLOAD_FOLDER_FOR_OUTPUT}"  # '/7'
 
     if not stock_data:
-        # אין CSV: בכל זאת נעביר לשלוחה 7 (ייתכן שלא יהיה מה להשמיע)
         log.warning("אין נתוני מניות (CSV). מעביר לשלוחה ברירת מחדל.")
         _cleanup_files([audio_file_path])
         return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
-    recognized_text = transcribe_audio(audio_file_path)
-    response_text = ""
+    # שלב ניקוי האודיו
+    if not enhance_wav_with_ffmpeg(audio_file_path, TEMP_CLEAN_WAV):
+        TEMP_CLEAN_WAV = audio_file_path  # fallback
+
+    # זיהוי עם אלטרנטיבות
+    alternatives = transcribe_with_alts(TEMP_CLEAN_WAV)
+    recognized_text = alternatives[0] if alternatives else ""
     best_match_key = None
 
-    if recognized_text:
+    if alternatives:
         log.info("חיפוש התאמה ברשימת המניות...")
-        best_match_key = get_best_match(recognized_text, stock_data)
+        best_match_key = get_best_match_multi_hypotheses(alternatives, list(stock_data.keys()))
 
+    response_text = ""
     if best_match_key:
         log.info(f"התאמה: {best_match_key}")
         stock_info = stock_data[best_match_key]
 
-        # --- אם יש שלוחה ייעודית → מחזירים תשובת API טקסטואלית למעבר ---
         if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
             api_path = _api_path_from_target(stock_info["target_path"])
-            log.info(f"החזרת תשובת API למעבר לשלוחה ייעודית: {api_path}")
-            _cleanup_files([audio_file_path])
+            _cleanup_files([audio_file_path, TEMP_CLEAN_WAV])
             return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
 
-        # --- אחרת: בונים טקסט להשמעה (ועדיין נעביר לשלוחה 7 בתשובת שרת) ---
+        # שליפת נתוני מניה
         data = get_stock_price_data(stock_info["symbol"])
         if data:
             direction = "עלייה" if data["day_change_percent"] > 0 else "ירידה"
@@ -277,57 +327,38 @@ async def process_yemot_recording(audio_file_path):
                 f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
                 f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
             )
-            log.info("נתונים הוחזרו בהצלחה (ללא שלוחה ייעודית).")
         else:
-            response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
-            log.warning("לא נמצאו נתונים למניה.")
+            response_text = f"לא נמצאו נתונים עבור מניית {stock_info['display_name']}."
     else:
-        # לא זוהתה מניה מהרשימה
         if recognized_text:
-            response_text = "לא נמצאה התאמה לנייר הערך שביקשת. אנא נסה שוב."
-            log.warning("לא נמצאה התאמה לרשימה.")
+            response_text = "לא נמצאה התאמה לנייר הערך שביקשת. נסה שוב."
         else:
-            response_text = "לא זוהה דיבור ברור בהקלטה. אנא נסה לדבר באופן ברור יותר."
-            log.warning("לא זוהה דיבור.")
+            response_text = "לא זוהה דיבור ברור בהקלטה. נסה לדבר באופן ברור יותר."
 
-    # ===== תמיד: מקרה ללא שלוחה ייעודית → נעלה קובץ 000.wav לשלוחה 7 ונחזיר go_to_folder=/7 =====
-    output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"  # '000.wav'
+    # הפקת קובץ אודיו
+    output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
     generated_audio_success = False
-    uploaded_wav = False
 
     if response_text:
         if await create_audio_file_from_text(response_text, TEMP_MP3_FILE):
             if convert_mp3_to_wav(TEMP_MP3_FILE, output_yemot_wav_name):
-                uploaded_wav = upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name)
-                generated_audio_success = uploaded_wav
-                if not uploaded_wav:
-                    log.error("כשל בהעלאת קובץ השמע לשלוחה 7.")
-            else:
-                log.error("כשל בהמרת MP3 ל-WAV.")
-        else:
-            log.error("כשל ביצירת קובץ אודיו מטקסט.")
-    else:
-        log.warning("אין טקסט להשמעה (response_text ריק).")
+                if upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name):
+                    generated_audio_success = True
 
-    # ניקוי קבצים מקומי
-    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE]
+    # ניקוי
+    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, TEMP_CLEAN_WAV]
     if os.path.exists(output_yemot_wav_name):
         local_files_to_clean.append(output_yemot_wav_name)
     _cleanup_files(local_files_to_clean)
 
-    # גם אם העלאת ה-WAV נכשלה — עדיין נעביר את המאזין לשלוחה 7 (כפי שביקשת)
-    if not generated_audio_success:
-        log.warning("מעביר לשלוחה 7 למרות כשל ביצירת/העלאת קובץ.")
-
     return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
-# --- נקודת קצה של ה-API שתקבל קבצים ---
+# ----------------------- API Endpoint -----------------------
 @app.route('/process_audio', methods=['GET'])
 def process_audio_endpoint():
     log.info("בקשה נכנסת (GET /process_audio)")
     stockname = request.args.get('stockname')
     if not stockname:
-        log.error("חסר פרמטר 'stockname'.")
         return jsonify({"error": "Missing 'stockname' parameter"}), 400
 
     yemot_download_url = "https://www.call2all.co.il/ym/api/DownloadFile"
@@ -339,18 +370,12 @@ def process_audio_endpoint():
         response = requests.get(yemot_download_url, params=params, timeout=30)
         response.raise_for_status()
 
-        file_path = TEMP_INPUT_WAV
-        with open(file_path, 'wb') as f:
+        with open(TEMP_INPUT_WAV, 'wb') as f:
             f.write(response.content)
 
         log.info("ההורדה הושלמה.")
-        # הפונקציה עלולה להחזיר Response טקסטואלי (go_to_folder=...) או JSON
-        result = asyncio.run(process_yemot_recording(file_path))
+        result = asyncio.run(process_yemot_recording(TEMP_INPUT_WAV))
         return result
-
-    except requests.exceptions.RequestException as e:
-        log.error(f"שגיאה בהורדה מימות: {e}")
-        return jsonify({"error": "Failed to download audio file"}), 500
     except Exception as e:
         log.error(f"שגיאה בעיבוד: {e}")
         return jsonify({"error": "Failed to process audio"}), 500
