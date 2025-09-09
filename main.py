@@ -296,12 +296,13 @@ async def process_yemot_recording(audio_file_path):
         _cleanup_files([audio_file_path])
         return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
-    # שלב ניקוי האודיו
-    if not enhance_wav_with_ffmpeg(audio_file_path, TEMP_CLEAN_WAV):
-        TEMP_CLEAN_WAV = audio_file_path  # fallback
+    # שלב ניקוי האודיו - שימוש ב-clean_path כדי למנוע בעיית scope
+    clean_path = TEMP_CLEAN_WAV
+    if not enhance_wav_with_ffmpeg(audio_file_path, clean_path):
+        clean_path = audio_file_path  # fallback אם הניקוי נכשל
 
     # זיהוי עם אלטרנטיבות
-    alternatives = transcribe_with_alts(TEMP_CLEAN_WAV)
+    alternatives = transcribe_with_alts(clean_path)
     recognized_text = alternatives[0] if alternatives else ""
     best_match_key = None
 
@@ -316,7 +317,7 @@ async def process_yemot_recording(audio_file_path):
 
         if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
             api_path = _api_path_from_target(stock_info["target_path"])
-            _cleanup_files([audio_file_path, TEMP_CLEAN_WAV])
+            _cleanup_files([audio_file_path, clean_path])
             return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
 
         # שליפת נתוני מניה
@@ -346,7 +347,7 @@ async def process_yemot_recording(audio_file_path):
                     generated_audio_success = True
 
     # ניקוי
-    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, TEMP_CLEAN_WAV]
+    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, clean_path]
     if os.path.exists(output_yemot_wav_name):
         local_files_to_clean.append(output_yemot_wav_name)
     _cleanup_files(local_files_to_clean)
