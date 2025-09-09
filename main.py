@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, Response
 from difflib import get_close_matches
 
 # ===== קונפיגורציית לוגים =====
-# מציגים רק שגיאות מספריות (אדום) מהמערכת/ספריות.
+# מציגים רק שגיאות אדומות מהמערכת/ספריות.
 logging.basicConfig(level=logging.ERROR, format="%(asctime)s | %(levelname)s | %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.ERROR)
@@ -176,6 +176,9 @@ def _api_path_from_target(target_path: str) -> str:
 # ----------------------- פונקציית העיבוד הראשית -----------------------
 async def process_yemot_recording(audio_file_path):
     try:
+        # מפריד בין מאזינים שונים
+        glog("----------------------")
+
         stock_data = load_stock_data(CSV_FILE_PATH)
         default_api_path = f"/{UPLOAD_FOLDER_FOR_OUTPUT}"
 
@@ -217,7 +220,7 @@ async def process_yemot_recording(audio_file_path):
             else:
                 response_text = "לא זוהה דיבור ברור בהקלטה. נסה לדבר ברור יותר."
 
-        # הפקת קובץ אודיו ושליחה לשלוחה (בלי לוג ירוק על ההפקה)
+        # הפקת קובץ אודיו ושליחה לשלוחה
         output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
         if response_text:
             if await create_audio_file_from_text(response_text, TEMP_MP3_FILE):
@@ -229,7 +232,6 @@ async def process_yemot_recording(audio_file_path):
         return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
     except Exception:
-        # אם יש שגיאה — כן מציגים את השגיאה (אדום), ולא מוסיפים לוגים ירוקים נוספים
         log.exception("שגיאה בעיבוד הקלטה")
         return jsonify({"error": "Failed to process audio"}), 500
 
@@ -258,6 +260,5 @@ def process_audio_endpoint():
         return jsonify({"error": "Failed to process audio"}), 500
 
 if __name__ == "__main__":
-    # כאן תראה לוגים “בהתחלה” אם יש הורדות/התקנות חיצוניות כחלק מהרצה בסביבה שלך
     print("השרת עלה. ממתין לבקשות...")
     app.run(host='0.0.0.0', port=5000, use_reloader=False)
