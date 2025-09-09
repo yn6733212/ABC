@@ -34,6 +34,14 @@ def setup_logging():
 setup_logging()
 log = logging.getLogger(__name__)
 
+# פונקציית לוג ירוק קצר וברור + מפריד
+GREEN = "\033[92m"
+RESET = "\033[0m"
+def glog(msg: str):
+    log.info(f"{GREEN}{msg}{RESET}")
+def gsep():
+    log.info(f"{GREEN}{'-'*38}{RESET}")
+
 # --- הגדרות מערכת ימות המשיח ---
 USERNAME = "0733181201"
 PASSWORD = "6714453"
@@ -93,22 +101,21 @@ def ensure_ffmpeg():
         log.info("FFmpeg זמין במערכת.")
 
 def transcribe_audio(filename):
-    log.info("תמלול ההקלטה...")
     r = sr.Recognizer()
     try:
         with sr.AudioFile(filename) as source:
             audio = r.record(source)
         recognized_text = r.recognize_google(audio, language="he-IL")
-        log.info(f"זוהה דיבור: '{recognized_text}'")
+        glog(f"✅ זוהה דיבור: {recognized_text}")
         return recognized_text
     except sr.UnknownValueError:
-        log.warning("דיבור לא ברור (לא זוהה).")
+        log.error("❌ לא זוהה דיבור ברור.")
         return ""
     except sr.RequestError as e:
-        log.error(f"שגיאת חיבור לשירות זיהוי דיבור: {e}")
+        log.error(f"❌ שגיאת זיהוי: {e}")
         return ""
     except Exception as e:
-        log.error(f"שגיאה בתמלול: {e}")
+        log.error(f"❌ שגיאה בתמלול: {e}")
         return ""
 
 def normalize_text(text):
@@ -150,11 +157,9 @@ def load_stock_data(path):
 # --- שתי שיטות התאמה: difflib + rapidfuzz ---
 def get_best_match(query, stock_dict):
     norm_query = normalize_text(query)
-    # rapidfuzz קודם
     rf_match = process.extractOne(norm_query, stock_dict.keys(), scorer=fuzz.token_sort_ratio, score_cutoff=70)
     if rf_match:
         return rf_match[0]
-    # fallback ל-get_close_matches
     matches = get_close_matches(norm_query, stock_dict.keys(), n=1, cutoff=0.7)
     if not matches:
         matches = get_close_matches(norm_query, stock_dict.keys(), n=1, cutoff=0.5)
@@ -173,7 +178,7 @@ def get_stock_price_data(ticker):
         day_change_percent = (current_price - day_before_price) / day_before_price * 100 if day_before_price else 0
         return {"current": round(current_price, 2), "day_change_percent": round(day_change_percent, 2)}
     except Exception as e:
-        log.error(f"שגיאה באחזור {ticker}: {e}")
+        log.error(f"❌ שגיאה באחזור נתונים: {e}")
         return None
 
 def create_ext_ini_file(action_type, value):
@@ -186,10 +191,9 @@ def create_ext_ini_file(action_type, value):
             elif action_type == "play_file":
                 f.write("type=playfile\n")
                 f.write("playfile_end_goto=/1/2\n")
-        log.info("נוצר ext.ini")
         return True
     except Exception as e:
-        log.error(f"שגיאה ביצירת INI: {e}")
+        log.error(f"❌ שגיאה ביצירת INI: {e}")
         return False
 
 def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
@@ -204,13 +208,12 @@ def upload_file_to_yemot(file_path, yemot_file_name_or_path_on_yemot):
         r = requests.post("https://www.call2all.co.il/ym/api/UploadFile",
                           data=m, headers={'Content-Type': m.content_type}, timeout=30)
         r.raise_for_status()
-        log.info(f"הועלה: {os.path.basename(file_path)} → {full_upload_path}")
         return True
     except requests.exceptions.RequestException as e:
-        log.error(f"שגיאה בהעלאה ({os.path.basename(file_path)}): {e}")
+        log.error(f"❌ שגיאה בהעלאה: {e}")
         return False
     except Exception as e:
-        log.error(f"שגיאה בהעלאה ({os.path.basename(file_path)}): {e}")
+        log.error(f"❌ שגיאה בהעלאה: {e}")
         return False
 
 def convert_mp3_to_wav(mp3_file, wav_file):
@@ -220,24 +223,22 @@ def convert_mp3_to_wav(mp3_file, wav_file):
              "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le", wav_file],
             check=True
         )
-        log.info(f"נוצר WAV: {wav_file}")
         return True
     except subprocess.CalledProcessError as e:
-        log.error(f"שגיאת FFmpeg: {e}")
+        log.error(f"❌ שגיאת FFmpeg: {e}")
     except FileNotFoundError:
-        log.error("FFmpeg לא נמצא.")
+        log.error("❌ FFmpeg לא נמצא.")
     except Exception as e:
-        log.error(f"שגיאה בהמרה: {e}")
+        log.error(f"❌ שגיאה בהמרה: {e}")
     return False
 
 async def create_audio_file_from_text(text, filename):
     try:
         comm = edge_tts.Communicate(text, voice="he-IL-AvriNeural")
         await comm.save(filename)
-        log.info("נוצר MP3 זמני.")
         return True
     except Exception as e:
-        log.error(f"שגיאת TTS: {e}")
+        log.error(f"❌ שגיאת TTS: {e}")
         return False
 
 def _cleanup_files(paths):
@@ -245,7 +246,6 @@ def _cleanup_files(paths):
         try:
             if f and os.path.exists(f):
                 os.remove(f)
-                log.info(f"נמחק זמני: {f}")
         except Exception:
             pass
 
@@ -259,10 +259,10 @@ def _api_path_from_target(target_path: str) -> str:
 
 # --- פונקציית העיבוד המרכזית ---
 async def process_yemot_recording(audio_file_path):
-    log.info("עיבוד הקלטה חדשה...")
     stock_data = load_stock_data(CSV_FILE_PATH)
     if not stock_data:
-        # אם אין נתוני מניות בכלל → החזר מיידית מעבר לשלוחה 7
+        glog("🎉 הסתיים בהצלחה")
+        gsep()
         _cleanup_files([audio_file_path])
         return Response("go_to_folder=/7", mimetype="text/plain; charset=utf-8")
 
@@ -272,16 +272,16 @@ async def process_yemot_recording(audio_file_path):
     action_value = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
 
     if recognized_text:
-        log.info("חיפוש התאמה ברשימת המניות...")
         best_match_key = get_best_match(recognized_text, stock_data)
         if best_match_key:
-            log.info(f"התאמה: {best_match_key}")
+            glog(f"🔎 נמצאה התאמה: {best_match_key}")
             stock_info = stock_data[best_match_key]
 
             # --- אם יש שלוחה ייעודית → החזר תשובת API בפורמט הנכון ---
             if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
                 api_path = _api_path_from_target(stock_info["target_path"])
-                log.info(f"החזרת תשובת API למעבר לשלוחה: {api_path}")
+                glog("🎉 הסתיים בהצלחה")
+                gsep()
                 _cleanup_files([audio_file_path])
                 return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
 
@@ -292,16 +292,12 @@ async def process_yemot_recording(audio_file_path):
                     f"מחיר מניית {stock_info['display_name']} עומד כעת על {data['current']} דולר. "
                     f"מתחילת היום נרשמה {direction} של {abs(data['day_change_percent'])} אחוז."
                 )
-                log.info("נתונים הוחזרו בהצלחה.")
             else:
                 response_text = f"מצטערים, לא הצלחנו למצוא נתונים עבור מניית {stock_info['display_name']}."
-                log.warning("לא נמצאו נתונים למניה.")
         else:
             response_text = "לא הצלחנו לזהות את נייר הערך שביקשת. אנא נסה שנית."
-            log.warning("לא נמצאה התאמה לרשימה.")
     else:
         response_text = "לא זוהה דיבור ברור בהקלטה. אנא נסה לדבר באופן ברור יותר."
-        log.warning("לא זוהה דיבור.")
 
     # יצירת קובץ שמע אם אין שלוחה ייעודית
     if response_text and action_type == "play_file":
@@ -311,7 +307,8 @@ async def process_yemot_recording(audio_file_path):
 
     _cleanup_files([audio_file_path, TEMP_MP3_FILE, OUTPUT_AUDIO_FILE_BASE + ".wav"])
 
-    # תשובת API בפורמט הנכון – תמיד מחזיר לשלוחה 7 כברירת מחדל
+    glog("🎉 הסתיים בהצלחה")
+    gsep()
     return Response("go_to_folder=/7", mimetype="text/plain; charset=utf-8")
 
 # --- נקודת קצה של ה-API ---
@@ -341,10 +338,10 @@ def process_audio_endpoint():
         return result
 
     except requests.exceptions.RequestException as e:
-        log.error(f"שגיאה בהורדה מימות: {e}")
+        log.error(f"❌ שגיאה בהורדה מימות: {e}")
         return jsonify({"error": "Failed to download audio file"}), 500
     except Exception as e:
-        log.error(f"שגיאה בעיבוד: {e}")
+        log.error(f"❌ שגיאה בעיבוד: {e}")
         return jsonify({"error": "Failed to process audio"}), 500
 
 if __name__ == "__main__":
