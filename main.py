@@ -13,7 +13,7 @@ import logging
 import warnings
 from requests_toolbelt import MultipartEncoder
 from flask import Flask, request, jsonify, Response
-from rapidfuzz import process, fuzz  # שדרוג 3 - RapidFuzz
+from difflib import get_close_matches  # לשיפור ההתאמה החלקית בלבד
 
 # ------------ לוגים (קצר ונקי) ------------
 LOG_LEVEL = logging.INFO
@@ -39,136 +39,23 @@ PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
 
 # **שלוחה יעד ברירת מחדל (ללא שלוחה ייעודית)**
-UPLOAD_FOLDER_FOR_OUTPUT = "7"  # נניח שמוגדרת בימות להשמיע 000.wav
+UPLOAD_FOLDER_FOR_OUTPUT = "7"
 
 # --- הגדרות קבצים ---
 CSV_FILE_PATH = "stock_data.csv"
 TEMP_MP3_FILE = "temp_output.mp3"
 TEMP_INPUT_WAV = "temp_input.wav"
-TEMP_CLEAN_WAV = "temp_clean.wav"  # קובץ אחרי ניקוי
-OUTPUT_AUDIO_FILE_BASE = "000"  # נעלה בשם 000.wav כדי שיתנגן כברירת מחדל בשלוחה
+OUTPUT_AUDIO_FILE_BASE = "000"
 
 # --- נתיב להרצת ffmpeg ---
 FFMPEG_EXECUTABLE = "ffmpeg"
 
-# --- הגדרת Flask App ---
+# --- Flask App ---
 app = Flask(__name__)
 
-# ----------------------- שדרוג 1: ניקוי אודיו -----------------------
-def enhance_wav_with_ffmpeg(in_wav: str, out_wav: str) -> bool:
-    """
-    ניקוי רעש, סינון תדרים ושמירה על פורמט 8kHz/PCM שמתאים לטלפוניה.
-    """
-    try:
-        filters = "highpass=f=120,lowpass=f=3800,afftdn=nr=12"
-        cmd = [
-            FFMPEG_EXECUTABLE, "-loglevel", "error", "-y",
-            "-i", in_wav,
-            "-af", filters,
-            "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le",
-            out_wav
-        ]
-        subprocess.run(cmd, check=True)
-        return True
-    except Exception as e:
-        log.error(f"שגיאה בשיפור אודיו: {e}")
-        return False
-
-def ensure_ffmpeg():
-    log.info("בודק FFmpeg...")
-    global FFMPEG_EXECUTABLE
-    if not shutil.which("ffmpeg"):
-        log.info("FFmpeg לא נמצא, מתקין...")
-        ffmpeg_bin_dir = "ffmpeg_bin"
-        os.makedirs(ffmpeg_bin_dir, exist_ok=True)
-        ffmpeg_url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-        archive_path = os.path.join(ffmpeg_bin_dir, "ffmpeg.tar.xz")
-        try:
-            r = requests.get(ffmpeg_url, stream=True, timeout=60)
-            r.raise_for_status()
-            with open(archive_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            with tarfile.open(archive_path, 'r:xz') as tar_ref:
-                tar_ref.extractall(ffmpeg_bin_dir)
-            os.remove(archive_path)
-
-            found_ffmpeg_path = None
-            for root, _, files in os.walk(ffmpeg_bin_dir):
-                if "ffmpeg" in files:
-                    found_ffmpeg_path = os.path.join(root, "ffmpeg")
-                    break
-            if found_ffmpeg_path:
-                FFMPEG_EXECUTABLE = found_ffmpeg_path
-                os.environ["PATH"] += os.pathsep + os.path.dirname(FFMPEG_EXECUTABLE)
-                if os.name == 'posix':
-                    os.chmod(FFMPEG_EXECUTABLE, 0o755)
-                log.info(f"FFmpeg הותקן: {FFMPEG_EXECUTABLE}")
-            else:
-                log.error("לא נמצא קובץ ffmpeg לאחר חילוץ.")
-                FFMPEG_EXECUTABLE = "ffmpeg"
-        except Exception as e:
-            log.error(f"שגיאה בהתקנת FFmpeg: {e}")
-            FFMPEG_EXECUTABLE = "ffmpeg"
-    else:
-        log.info("FFmpeg זמין במערכת.")
-
-# ----------------------- שדרוג 2: שיפור פרמטרי זיהוי -----------------------
-def transcribe_with_alts(filename):
-    """
-    זיהוי דיבור עם קבלת מספר אלטרנטיבות (n-best) לשיפור זיהוי מניות.
-    """
-    r = sr.Recognizer()
-    # פרמטרים מתקדמים לדיוק טוב יותר
-    r.energy_threshold = 200
-    r.dynamic_energy_threshold = True
-    r.pause_threshold = 0.5
-    r.phrase_threshold = 0.1
-    r.non_speaking_duration = 0.2
-
-    try:
-        with sr.AudioFile(filename) as source:
-            audio = r.record(source)
-        res = r.recognize_google(audio, language="he-IL", show_all=True)
-        texts = []
-        if isinstance(res, dict) and "alternative" in res:
-            for a in res["alternative"]:
-                t = a.get("transcript")
-                if t:
-                    texts.append(t)
-        if not texts:
-            # fallback
-            single = r.recognize_google(audio, language="he-IL")
-            if single:
-                texts = [single]
-        log.info(f"זוהו אלטרנטיבות: {texts}")
-        return texts
-    except sr.UnknownValueError:
-        log.warning("דיבור לא ברור (לא זוהה).")
-        return []
-    except sr.RequestError as e:
-        log.error(f"שגיאת חיבור לשירות זיהוי דיבור: {e}")
-        return []
-    except Exception as e:
-        log.error(f"שגיאה בתמלול: {e}")
-        return []
-
-# ----------------------- שדרוג 3: RapidFuzz להשוואת שמות -----------------------
-def get_best_match_multi_hypotheses(hypotheses, stock_keys):
-    """
-    בחירת ההתאמה הטובה ביותר בין האלטרנטיבות לבין רשימת המניות.
-    """
-    best = None
-    best_score = -1
-    for h in hypotheses:
-        q = normalize_text(h)
-        match = process.extractOne(q, stock_keys, scorer=fuzz.token_set_ratio, score_cutoff=70)
-        if match and match[1] > best_score:
-            best, best_score = match[0], match[1]
-    return best
-
-# ----------------------- פונקציות קיימות -----------------------
+# ----------------------- פונקציות עזר -----------------------
 def normalize_text(text):
+    """ניקוי טקסט להשוואה פשוטה"""
     if not isinstance(text, str):
         if pd.isna(text):
             text = ""
@@ -203,6 +90,32 @@ def load_stock_data(path):
     except Exception as e:
         log.error(f"שגיאה בטעינת נתוני מניות: {e}")
         return {}
+
+def get_best_match(query, stock_dict):
+    """
+    שיפור: חיפוש התאמה גם אם לא ב־100% בעזרת difflib
+    """
+    matches = get_close_matches(normalize_text(query), stock_dict.keys(), n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+def transcribe_audio(filename):
+    log.info("תמלול ההקלטה...")
+    r = sr.Recognizer()
+    try:
+        with sr.AudioFile(filename) as source:
+            audio = r.record(source)
+        recognized_text = r.recognize_google(audio, language="he-IL")
+        log.info(f"זוהה דיבור: '{recognized_text}'")
+        return recognized_text
+    except sr.UnknownValueError:
+        log.warning("דיבור לא ברור (לא זוהה).")
+        return ""
+    except sr.RequestError as e:
+        log.error(f"שגיאת חיבור לשירות זיהוי דיבור: {e}")
+        return ""
+    except Exception as e:
+        log.error(f"שגיאה בתמלול: {e}")
+        return ""
 
 def get_stock_price_data(ticker):
     log.info(f"אחזור נתונים: {ticker}")
@@ -289,38 +202,30 @@ def _api_path_from_target(target_path: str) -> str:
 async def process_yemot_recording(audio_file_path):
     log.info("עיבוד הקלטה חדשה...")
     stock_data = load_stock_data(CSV_FILE_PATH)
-    default_api_path = f"/{UPLOAD_FOLDER_FOR_OUTPUT}"  # '/7'
+    default_api_path = f"/{UPLOAD_FOLDER_FOR_OUTPUT}"
 
     if not stock_data:
         log.warning("אין נתוני מניות (CSV). מעביר לשלוחה ברירת מחדל.")
         _cleanup_files([audio_file_path])
         return Response(f"go_to_folder={default_api_path}", mimetype="text/plain; charset=utf-8")
 
-    # שלב ניקוי האודיו - שימוש ב-clean_path כדי למנוע בעיית scope
-    clean_path = TEMP_CLEAN_WAV
-    if not enhance_wav_with_ffmpeg(audio_file_path, clean_path):
-        clean_path = audio_file_path  # fallback אם הניקוי נכשל
-
-    # זיהוי עם אלטרנטיבות
-    alternatives = transcribe_with_alts(clean_path)
-    recognized_text = alternatives[0] if alternatives else ""
+    recognized_text = transcribe_audio(audio_file_path)
+    response_text = ""
     best_match_key = None
 
-    if alternatives:
+    if recognized_text:
         log.info("חיפוש התאמה ברשימת המניות...")
-        best_match_key = get_best_match_multi_hypotheses(alternatives, list(stock_data.keys()))
+        best_match_key = get_best_match(recognized_text, stock_data)
 
-    response_text = ""
     if best_match_key:
         log.info(f"התאמה: {best_match_key}")
         stock_info = stock_data[best_match_key]
 
         if stock_info["has_dedicated_folder"] and stock_info["target_path"]:
             api_path = _api_path_from_target(stock_info["target_path"])
-            _cleanup_files([audio_file_path, clean_path])
+            _cleanup_files([audio_file_path])
             return Response(f"go_to_folder={api_path}", mimetype="text/plain; charset=utf-8")
 
-        # שליפת נתוני מניה
         data = get_stock_price_data(stock_info["symbol"])
         if data:
             direction = "עלייה" if data["day_change_percent"] > 0 else "ירידה"
@@ -334,20 +239,17 @@ async def process_yemot_recording(audio_file_path):
         if recognized_text:
             response_text = "לא נמצאה התאמה לנייר הערך שביקשת. נסה שוב."
         else:
-            response_text = "לא זוהה דיבור ברור בהקלטה. נסה לדבר באופן ברור יותר."
+            response_text = "לא זוהה דיבור ברור בהקלטה. נסה לדבר ברור יותר."
 
-    # הפקת קובץ אודיו
+    # הפקת קובץ אודיו ושליחה לשלוחה
     output_yemot_wav_name = f"{OUTPUT_AUDIO_FILE_BASE}.wav"
-    generated_audio_success = False
-
     if response_text:
         if await create_audio_file_from_text(response_text, TEMP_MP3_FILE):
             if convert_mp3_to_wav(TEMP_MP3_FILE, output_yemot_wav_name):
-                if upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name):
-                    generated_audio_success = True
+                upload_file_to_yemot(output_yemot_wav_name, output_yemot_wav_name)
 
     # ניקוי
-    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE, clean_path]
+    local_files_to_clean = [audio_file_path, TEMP_MP3_FILE]
     if os.path.exists(output_yemot_wav_name):
         local_files_to_clean.append(output_yemot_wav_name)
     _cleanup_files(local_files_to_clean)
@@ -382,7 +284,6 @@ def process_audio_endpoint():
         return jsonify({"error": "Failed to process audio"}), 500
 
 if __name__ == "__main__":
-    ensure_ffmpeg()
     _ = load_stock_data(CSV_FILE_PATH)
     log.info("השרת עלה. ממתין לבקשות...")
     app.run(host='0.0.0.0', port=5000, use_reloader=False)
