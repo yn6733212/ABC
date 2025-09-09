@@ -9,3 +9,14 @@ numpy
 setuptools
 Flask
 rapidfuzz
+
+
+requests
+asyncio
+edge-tts
+pandas
+yfinance
+SpeechRecognition
+requests-toolbelt
+Flask
+rapidfuzz
