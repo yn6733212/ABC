@@ -46,7 +46,7 @@ def gsep():
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
-UPLOAD_FOLDER_FOR_OUTPUT = "7"  # ברירת מחדל 7 במקום 11
+UPLOAD_FOLDER_FOR_OUTPUT = "7"  # ברירת מחדל 7
 
 # --- הגדרות קבצים ---
 CSV_FILE_PATH = "stock_data.csv"
@@ -145,7 +145,6 @@ def load_stock_data(path):
                     "has_dedicated_folder": has_dedicated_folder,
                     "target_path": target_path if has_dedicated_folder and pd.notna(target_path) else ""
                 }
-        log.info(f"נטענו נתוני מניות ({len(stock_data)} פריטים).")
         return stock_data
     except FileNotFoundError:
         log.error(f"קובץ לא נמצא: {path}")
@@ -166,12 +165,10 @@ def get_best_match(query, stock_dict):
     return matches[0] if matches else None
 
 def get_stock_price_data(ticker):
-    log.info(f"אחזור נתונים: {ticker}")
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="7d")
         if hist.empty or len(hist) < 2:
-            log.warning(f"אין מספיק היסטוריה עבור {ticker}.")
             return None
         current_price = hist["Close"].iloc[-1]
         day_before_price = hist["Close"].iloc[-2]
@@ -314,10 +311,13 @@ async def process_yemot_recording(audio_file_path):
 # --- נקודת קצה של ה-API ---
 @app.route('/process_audio', methods=['GET'])
 def process_audio_endpoint():
-    log.info("בקשה נכנסת (GET /process_audio)")
+    # 1) בקשה נכנסת עם מספר המאזין
+    caller = request.args.get('ApiPhone') or request.args.get('ApiCaller') or "לא ידוע"
+    glog(f"📞 בקשה נכנסת ממספר: {caller}")
+
     stockname = request.args.get('stockname')
     if not stockname:
-        log.error("חסר פרמטר 'stockname'.")
+        log.error("❌ חסר פרמטר 'stockname'.")
         return jsonify({"error": "Missing 'stockname' parameter"}), 400
 
     yemot_download_url = "https://www.call2all.co.il/ym/api/DownloadFile"
@@ -325,7 +325,6 @@ def process_audio_endpoint():
     params = {"token": TOKEN, "path": file_path_on_yemot}
 
     try:
-        log.info(f"הורדת אודיו: {file_path_on_yemot}")
         response = requests.get(yemot_download_url, params=params, timeout=30)
         response.raise_for_status()
 
@@ -333,7 +332,6 @@ def process_audio_endpoint():
         with open(file_path, 'wb') as f:
             f.write(response.content)
 
-        log.info("ההורדה הושלמה.")
         result = asyncio.run(process_yemot_recording(file_path))
         return result
 
@@ -346,6 +344,6 @@ def process_audio_endpoint():
 
 if __name__ == "__main__":
     ensure_ffmpeg()
-    _ = load_stock_data(CSV_FILE_PATH)
+    _ = load_stock_data(CSV_FILE_PATH)  # טעינה חד-פעמית לבדיקה (לוג אתחול בלבד)
     log.info("השרת עלה. ממתין לבקשות...")
     app.run(host='0.0.0.0', port=5000, use_reloader=False)
