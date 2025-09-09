@@ -34,13 +34,11 @@ def setup_logging():
 setup_logging()
 log = logging.getLogger(__name__)
 
-# פונקציית לוג ירוק קצר וברור + מפריד
-GREEN = "\033[92m"
-RESET = "\033[0m"
+# פונקציית לוג קצרה וברורה + מפריד (בלי צבעים)
 def glog(msg: str):
-    log.info(f"{GREEN}{msg}{RESET}")
+    log.info(msg)
 def gsep():
-    log.info(f"{GREEN}{'-'*38}{RESET}")
+    log.info("-" * 38)
 
 # --- הגדרות מערכת ימות המשיח ---
 USERNAME = "0733181201"
