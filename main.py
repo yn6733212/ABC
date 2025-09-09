@@ -13,20 +13,36 @@ import shutil
 import tarfile
 import logging
 import warnings
+import sys
 from requests_toolbelt import MultipartEncoder
 from flask import Flask, request, jsonify, Response
 
-# ------------ לוגים (קצר ונקי) ------------
+# ------------ לוגים (קצר ונקי, בלי אדום, בלי אות רמה) ------------
 LOG_LEVEL = logging.INFO
 def setup_logging():
-    fmt = "%(asctime)s | %(levelname).1s | %(message)s"
+    fmt = "%(asctime)s | %(message)s"   # בלי %(levelname).1s ⇒ לא תופיע האות I
     datefmt = "%H:%M:%S"
-    logging.basicConfig(level=LOG_LEVEL, format=fmt, datefmt=datefmt)
+
+    root = logging.getLogger()
+    root.setLevel(LOG_LEVEL)
+
+    # נקה handlers קיימים
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    # הכל ל-stdout (גם ERROR) כדי למנוע צביעה אדומה בפאנלים מסוימים
+    out_handler = logging.StreamHandler(sys.stdout)
+    out_handler.setLevel(LOG_LEVEL)
+    out_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    root.addHandler(out_handler)
+
+    # השתקת ספריות רועשות
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("edge_tts").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("yfinance").setLevel(logging.WARNING)
+
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
@@ -34,11 +50,13 @@ def setup_logging():
 setup_logging()
 log = logging.getLogger(__name__)
 
-# פונקציית לוג קצרה וברורה + מפריד (בלי צבעים)
+# פונקציית לוג ירוק קצר וברור + מפריד (לקריאות בלבד)
+GREEN = "\033[92m"
+RESET = "\033[0m"
 def glog(msg: str):
-    log.info(msg)
+    log.info(f"{GREEN}{msg}{RESET}")
 def gsep():
-    log.info("-" * 38)
+    log.info(f"{GREEN}{'-'*38}{RESET}")
 
 # --- הגדרות מערכת ימות המשיח ---
 USERNAME = "0733181201"
@@ -98,14 +116,35 @@ def ensure_ffmpeg():
     else:
         log.info("FFmpeg זמין במערכת.")
 
+# --- תמלול משופר: show_all + בחירת התמליל הארוך/סביר ביותר ---
 def transcribe_audio(filename):
     r = sr.Recognizer()
+    # כיוונונים עדינים להפחתת חיתוך מוקדם
+    r.energy_threshold = 200
+    r.dynamic_energy_threshold = True
+    r.pause_threshold = 0.6
+    r.non_speaking_duration = 0.2
     try:
         with sr.AudioFile(filename) as source:
             audio = r.record(source)
-        recognized_text = r.recognize_google(audio, language="he-IL")
-        glog(f"✅ זוהה דיבור: {recognized_text}")
-        return recognized_text
+
+        res = r.recognize_google(audio, language="he-IL", show_all=True)
+
+        text = ""
+        if isinstance(res, dict) and "alternative" in res and res["alternative"]:
+            alts = [a.get("transcript", "") for a in res["alternative"] if a.get("transcript")]
+            if alts:
+                # בחר את התמליל הארוך ביותר (בד"כ המלא ביותר)
+                text = max(alts, key=len)
+        if not text:
+            # נפילה חזרה לפלט יחיד
+            text = r.recognize_google(audio, language="he-IL")
+
+        if text:
+            glog(f"✅ זוהה דיבור: {text}")
+        else:
+            log.error("❌ לא זוהה דיבור ברור.")
+        return text
     except sr.UnknownValueError:
         log.error("❌ לא זוהה דיבור ברור.")
         return ""
@@ -151,7 +190,7 @@ def load_stock_data(path):
         log.error(f"שגיאה בטעינת נתוני מניות: {e}")
         return {}
 
-# --- שתי שיטות התאמה: difflib + rapidfuzz ---
+# --- שתי שיטות התאמה: RapidFuzz קודם ואז difflib כגיבוי ---
 def get_best_match(query, stock_dict):
     norm_query = normalize_text(query)
     rf_match = process.extractOne(norm_query, stock_dict.keys(), scorer=fuzz.token_sort_ratio, score_cutoff=70)
@@ -309,7 +348,7 @@ async def process_yemot_recording(audio_file_path):
 # --- נקודת קצה של ה-API ---
 @app.route('/process_audio', methods=['GET'])
 def process_audio_endpoint():
-    # 1) בקשה נכנסת עם מספר המאזין
+    # 1) בקשה נכנסת עם מספר המאזין (לוג ירוק)
     caller = request.args.get('ApiPhone') or request.args.get('ApiCaller') or "לא ידוע"
     glog(f"📞 בקשה נכנסת ממספר: {caller}")
 
